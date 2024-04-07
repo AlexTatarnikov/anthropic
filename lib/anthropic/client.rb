@@ -2,6 +2,8 @@ module Anthropic
   class Client
     extend Anthropic::HTTP
 
+    ERRORS_TO_RETRY = %w[overloaded_error api_error rate_limit_error]
+
     def initialize(access_token: nil, organization_id: nil, uri_base: nil, request_timeout: nil,
                    extra_headers: {})
       Anthropic.configuration.access_token = access_token if access_token
@@ -27,24 +29,25 @@ module Anthropic
       loop do
         attempts += 1
         Anthropic::Client.json_post(path: "/messages", parameters: parameters).tap do |response|
+          error_type = response.dig("error", "type")
+          error_message = response.dig("error", "message")
+
           # handle successful response
-          return response if response.dig("content", 0, "text").present?
+          return response unless error_message
 
           # handle max attempts
           if attempts > max_attempts
-            raise Anthropic::Error,
-                  "Failed after #{max_attempts} attempts. #{error_message}"
+            raise Anthropic::Error.new("Failed after #{max_attempts} attempts. #{error_message}")
+                  
           end
 
-          # handle error response
-          error_type = response.dig("error", "type")
-          error_message = response.dig("error", "message")
-          if %w[overloaded_error api_error rate_limit_error].include?(error_type) # rubocop:disable Style/GuardClause
-            # retry loop with exponential backoff
-            sleep(1 * attempts)
-          else
-            raise Anthropic::Error, error_message
-          end
+          if ERRORS_TO_RETRY.include?(error_type)
+            sleep(1 * attempts) 
+
+            redo
+          end  
+
+          raise Anthropic::Error.new(error_message) 
         end
       end
     end
